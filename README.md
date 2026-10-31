@@ -49,6 +49,8 @@ Collapsible answers (`<details>`) are expanded automatically in both PDF modes.
 
 ## Cost and time
 
-- Costs are billed to your own Anthropic account. The plan card shows estimated input tokens before you start. Haiku is cheapest and Opus is deepest.
+- Costs are billed to your own Anthropic account. The plan card shows estimated input tokens before you start. The default writing model is Claude Fable 5.1, the most capable and most expensive ($10 / $50 per million input / output tokens, 5× Sonnet 5.5). Haiku is cheapest; Sonnet or Opus are good lower-cost choices.
+- Claude Fable 5.1 needs 30-day data retention, so it is unavailable to organisations on zero data retention. Pick another model if you get a 400 error mentioning retention.
+- If a model's safety filter declines a request, the app opts into Anthropic's server-side fallback, which re-runs it on another model automatically.
 - PDF pages are read as text plus an image, at roughly 1,500–3,000 tokens of text per page plus the image cost. For example, 1,000 pages is roughly 2.5M input tokens in the reading step.
 - New API accounts have low per-minute token limits. If you see repeated rate-limit retries, set parallel requests to 1–2. The run will be slower but won't fail.

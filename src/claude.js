@@ -4,10 +4,16 @@
 const API_URL = "https://api.anthropic.com/v1/messages";
 
 export const MODELS = [
-  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 (balanced, recommended)" },
-  { id: "claude-opus-5-5", label: "Claude Opus 5.5 (deepest, slower, pricier)" },
+  { id: "claude-fable-5-1", label: "Claude Fable 5.1 (most capable, slowest, priciest)" },
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5 (deep, cheaper than Fable)" },
+  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5 (balanced)" },
   { id: "claude-haiku-5-5", label: "Claude Haiku 5.5 (fastest, cheapest)" },
 ];
+
+// Models whose safety classifiers can decline a request (stop_reason "refusal").
+// For these we opt into server-side fallback: on a decline, the API re-runs the
+// request on a suitable fallback model within the same call.
+const FALLBACK_MODELS = new Set(["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"]);
 
 export const FINAL_SYSTEM = `You are an expert tutor and exam coach. The user supplies study materials (or condensed notes extracted from them) and instructions describing the exam-prep output they want (e.g. revision notes, summaries, flashcards, practice questions with answers, mock tests, cheat sheets).
 
@@ -93,18 +99,19 @@ export async function generateLong({ apiKey, model, system, content, maxTokens =
 }
 
 async function streamOnce({ apiKey, model, system, messages, maxTokens, signal, onDelta }) {
-  const res = await fetch(API_URL, {
-    method: "POST",
-    signal,
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      // Required for calls made directly from a browser.
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify({ model, max_tokens: maxTokens, system, messages, stream: true }),
-  });
+  const headers = {
+    "content-type": "application/json",
+    "x-api-key": apiKey,
+    "anthropic-version": "2023-06-01",
+    // Required for calls made directly from a browser.
+    "anthropic-dangerous-direct-browser-access": "true",
+  };
+  const body = { model, max_tokens: maxTokens, system, messages, stream: true };
+  if (FALLBACK_MODELS.has(model)) {
+    headers["anthropic-beta"] = "server-side-fallback-2026-07-01";
+    body.fallbacks = "default";
+  }
+  const res = await fetch(API_URL, { method: "POST", signal, headers, body: JSON.stringify(body) });
 
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;
@@ -141,6 +148,11 @@ async function streamOnce({ apiKey, model, system, messages, maxTokens, signal, 
         onDelta(data.delta.text);
       } else if (data.type === "message_delta" && data.delta?.stop_reason) {
         stopReason = data.delta.stop_reason;
+        if (stopReason === "refusal") {
+          const d = data.delta.stop_details;
+          const why = d?.explanation || (d?.category ? `category: ${d.category}` : "");
+          throw new ApiError(`Claude declined this request${why ? ` (${why})` : ""}. Try rewording the instructions or choosing a different model.`, { status: 200 });
+        }
       } else if (data.type === "error") {
         const t = data.error?.type;
         throw new ApiError(data.error?.message || "Stream error", { retryable: t === "overloaded_error" || t === "api_error" });
