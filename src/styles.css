@@ -92,3 +92,18 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .empty { height: calc(100vh - 130px); min-height: 520px; display: grid; place-content: center; text-align: center; color: var(--muted); border: 1px dashed var(--line); border-radius: 10px; }
 .empty-art { font-size: 2.6rem; margin-bottom: 6px; }
 .foot { text-align: center; margin-top: 24px; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px; margin-bottom: 10px; }
+.stats div { background: var(--bg); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; }
+.stats b { font-size: 1.05rem; }
+.stats span { font-size: .75rem; color: var(--muted); }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.row2 .lbl { margin-top: 4px; }
+.progress { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; }
+.progress-head { display: flex; justify-content: space-between; font-size: .88rem; margin-bottom: 8px; }
+.bar { height: 8px; background: var(--bg); border-radius: 99px; overflow: hidden; }
+.fill { height: 100%; background: var(--accent); border-radius: 99px; transition: width .3s; }
+.fill.indet { width: 35% !important; animation: slide 1.4s ease-in-out infinite; }
+@keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+.msg { margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.top h1 { margin-bottom: 4px; }

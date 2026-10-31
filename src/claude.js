@@ -1,5 +1,5 @@
-// Minimal browser client for the Anthropic Messages API with streaming
-// and automatic continuation when the output hits max_tokens.
+// Browser client for the Anthropic Messages API: streaming, retries with
+// backoff on rate limits / overload, and auto-continuation at max_tokens.
 
 const API_URL = "https://api.anthropic.com/v1/messages";
 
@@ -9,7 +9,7 @@ export const MODELS = [
   { id: "claude-haiku-5-5", label: "Claude Haiku 5.5 (fastest, cheapest)" },
 ];
 
-export const SYSTEM_PROMPT = `You are an expert tutor and exam coach. The user supplies study materials and instructions describing the exam-prep output they want (e.g. revision notes, summaries, flashcards, practice questions with answers, mock tests, cheat sheets, mind-map style outlines).
+export const FINAL_SYSTEM = `You are an expert tutor and exam coach. The user supplies study materials (or condensed notes extracted from them) and instructions describing the exam-prep output they want (e.g. revision notes, summaries, flashcards, practice questions with answers, mock tests, cheat sheets).
 
 Rules:
 - Ground everything in the supplied materials. If you add knowledge beyond them, mark it clearly as "Beyond the materials".
@@ -17,34 +17,82 @@ Rules:
 - Expand every acronym on first use, e.g. CSA (Certified System Administrator).
 - Output ONLY an HTML fragment (no <html>, <head>, <body>, no markdown fences, no commentary before or after). It will be inserted into a styled printable page.
 - Use semantic HTML: <h1> once for the title, <h2>/<h3> for sections, <p>, <ul>/<ol>, <table> for comparisons, <blockquote> for key definitions, <code>/<pre> for code or commands.
-- Useful classes you may use: <div class="callout tip">, <div class="callout warn">, <div class="callout key"> for highlighted boxes; <details><summary>Question</summary>Answer</details> for self-test Q&A; <div class="page-break"></div> between major parts.
+- Useful classes: <div class="callout tip">, <div class="callout warn">, <div class="callout key"> for highlighted boxes; <details><summary>Question</summary>Answer</details> for self-test Q&A; <div class="page-break"></div> between major parts.
 - No <script>, no external images, no inline event handlers.`;
 
-/**
- * Stream a generation. onText(fullTextSoFar) is called as tokens arrive.
- * Returns the final text. Continues automatically up to maxContinuations times.
- */
-export async function generate({ apiKey, model, content, maxTokens = 32000, maxContinuations = 3, onText, onStatus, signal }) {
+export const MAP_SYSTEM = `You are extracting study notes from one section of a larger body of study materials. Your notes will later be merged with notes from all other sections to produce exam-prep material, so the original material will NOT be available again — anything you omit is lost.
+
+Write dense, well-organised Markdown notes that capture EVERYTHING exam-relevant in this section:
+- every definition, concept, rule, process/procedure step, formula, number, threshold, date, name, command, config setting and comparison
+- examples and scenarios that illustrate how concepts are applied
+- anything flagged as important, a warning, a best practice or a common mistake
+- content of tables, diagrams and charts (describe them in words or as Markdown tables)
+Prefix each topic heading with the source reference given to you (file name and pages/part).
+Be concise in wording but complete in coverage. Do not add an introduction or conclusion. Do not invent content.`;
+
+export const REDUCE_SYSTEM = `You are merging several sets of study notes (extracted from different parts of the same study materials) into one consolidated set of Markdown notes.
+- Organise by topic, not by source. Merge duplicates and overlapping points.
+- Preserve every distinct exam-relevant fact, definition, number, step, command and example. Shorten wording, never drop facts.
+- Keep short source references in brackets where useful.
+- Output only the merged Markdown notes.`;
+
+export class ApiError extends Error {
+  constructor(message, { status, retryable = false, tooLarge = false, retryAfter = 0 } = {}) {
+    super(message);
+    this.status = status;
+    this.retryable = retryable;
+    this.tooLarge = tooLarge;
+    this.retryAfter = retryAfter;
+  }
+}
+
+const TOO_LARGE_RE = /prompt is too long|too long|exceed|too large|maximum.*(pages|tokens|size)|request_too_large|context/i;
+const sleep = (ms, signal) =>
+  new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener("abort", () => { clearTimeout(t); reject(new DOMException("Aborted", "AbortError")); }, { once: true });
+  });
+
+/** One streamed call with retries. Returns { text, stopReason }. */
+export async function callClaude({ apiKey, model, system, messages, maxTokens, signal, onDelta, onRetry, maxAttempts = 7 }) {
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    let emitted = "";
+    try {
+      return await streamOnce({ apiKey, model, system, messages, maxTokens, signal, onDelta: (t) => { emitted += t; onDelta?.(t); } });
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      const isNetwork = e instanceof TypeError;
+      const retryable = isNetwork || e.retryable;
+      // Don't retry once text has been streamed to the caller (it would duplicate output).
+      if (!retryable || attempt >= maxAttempts || emitted) throw e;
+      const wait = e.retryAfter ? e.retryAfter * 1000 : Math.min(90000, 4000 * 2 ** (attempt - 1)) + Math.random() * 1500;
+      onRetry?.(`${e.message} — retrying in ${Math.round(wait / 1000)}s (attempt ${attempt + 1}/${maxAttempts})`);
+      await sleep(wait, signal);
+    }
+  }
+}
+
+/** Streamed generation that continues automatically when max_tokens is hit. */
+export async function generateLong({ apiKey, model, system, content, maxTokens = 32000, maxContinuations = 3, onText, onStatus, signal }) {
   const messages = [{ role: "user", content }];
   let full = "";
-
   for (let round = 0; round <= maxContinuations; round++) {
-    if (round > 0) onStatus?.(`Output was long — continuing (part ${round + 1})…`);
-    const { text, stopReason } = await streamOnce({
-      apiKey, model, messages, maxTokens, signal,
+    if (round > 0) onStatus?.(`Output is long — continuing (part ${round + 1})…`);
+    const { text, stopReason } = await callClaude({
+      apiKey, model, system, messages, maxTokens, signal,
+      onRetry: onStatus,
       onDelta: (t) => { full += t; onText?.(full); },
     });
     if (stopReason !== "max_tokens") return full;
     messages.push({ role: "assistant", content: text });
-    messages.push({
-      role: "user",
-      content: "Continue exactly where you stopped. Do not repeat anything and do not add any preamble — output only the remaining HTML.",
-    });
+    messages.push({ role: "user", content: "Continue exactly where you stopped. Do not repeat anything and do not add any preamble — output only the remaining content." });
   }
   return full;
 }
 
-async function streamOnce({ apiKey, model, messages, maxTokens, signal, onDelta }) {
+async function streamOnce({ apiKey, model, system, messages, maxTokens, signal, onDelta }) {
   const res = await fetch(API_URL, {
     method: "POST",
     signal,
@@ -55,23 +103,27 @@ async function streamOnce({ apiKey, model, messages, maxTokens, signal, onDelta 
       // Required for calls made directly from a browser.
       "anthropic-dangerous-direct-browser-access": "true",
     },
-    body: JSON.stringify({ model, max_tokens: maxTokens, system: SYSTEM_PROMPT, messages, stream: true }),
+    body: JSON.stringify({ model, max_tokens: maxTokens, system, messages, stream: true }),
   });
 
   if (!res.ok) {
     let msg = `${res.status} ${res.statusText}`;
+    let type = "";
     try {
       const j = await res.json();
       if (j?.error?.message) msg = j.error.message;
+      type = j?.error?.type || "";
     } catch { /* ignore */ }
-    throw new Error(msg);
+    const retryAfter = parseInt(res.headers.get("retry-after") || "0", 10) || 0;
+    const retryable = [408, 429, 500, 502, 503, 504, 529].includes(res.status) || type === "overloaded_error";
+    const tooLarge = res.status === 413 || (res.status === 400 && TOO_LARGE_RE.test(msg));
+    if (res.status === 401) msg = "Invalid API key (401). Check the key and try again.";
+    throw new ApiError(msg, { status: res.status, retryable, tooLarge, retryAfter });
   }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
-  let text = "";
-  let stopReason = null;
+  let buffer = "", text = "", stopReason = null;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -90,7 +142,8 @@ async function streamOnce({ apiKey, model, messages, maxTokens, signal, onDelta 
       } else if (data.type === "message_delta" && data.delta?.stop_reason) {
         stopReason = data.delta.stop_reason;
       } else if (data.type === "error") {
-        throw new Error(data.error?.message || "Stream error");
+        const t = data.error?.type;
+        throw new ApiError(data.error?.message || "Stream error", { retryable: t === "overloaded_error" || t === "api_error" });
       }
     }
   }
